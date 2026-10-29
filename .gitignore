@@ -1,0 +1,28 @@
+# Секреты — никогда в репозиторий. Ключ Claude API хранится только на устройстве (настройки приложения), не в файлах.
+.env
+.env.*
+*.env
+*.key
+*.pem
+*.p12
+*.secret
+secret*
+secrets*
+*token*
+*credential*
+
+# Экспорт данных приложения — это данные здоровья
+bodyos-*.json
+bodyos-*.csv
+*.csv
+export*/
+backup*/
+
+# Служебное
+__pycache__/
+*.pyc
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

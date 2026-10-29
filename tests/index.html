@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Body OS — тесты</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+    .ok { color: #166534; margin: 4px 0; }
+    .fail { color: #b91c1c; margin: 4px 0; }
+    .note { color: #444; margin-left: 18px; font-size: 13px; }
+    pre { white-space: pre-wrap; background: #fef2f2; padding: 8px; color: #7f1d1d; }
+    #sum { font-weight: 600; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <div id="sum">Тесты выполняются…</div>
+  <div id="out"></div>
+  <script type="module">
+    import { runAll } from './harness.js';
+    import './training.test.js';
+    import './safety.test.js';
+    import './stack.test.js';
+    import './coach.test.js';
+    import './lexicon.test.js';
+    import './llm.test.js';
+    import './db.test.js';
+    const res = await runAll(document.getElementById('out'));
+    document.getElementById('sum').textContent = `Пройдено ${res.total - res.failed} из ${res.total}`;
+  </script>
+</body>
+</html>
