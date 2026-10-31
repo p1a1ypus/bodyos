@@ -1,7 +1,11 @@
 // Прикладной слой: связывает ядро (чистые функции) с хранилищем. Экраны вызывают только его.
 import { addDays, dayKey, daysBetween, isWeekend, weekStart, weekDays, mean, groupBy, uid } from '../core/util.js';
 import { CONFIDENCE, COACH, STACK } from '../core/constants.js';
-import { CATALOG, CATALOG_BY_ID, FOODS_BY_ID, resolveDish, searchCatalog, excludedTags, allowedByRestrictions } from '../core/foods.js';
+import {
+  CATALOG_BY_ID, ROW_BY_CODE, ROWS_BY_RAW, SEED_ALIASES, SEED_VERSION, LEGACY_MAP, resolveDish, excludedTags, allowedByRestrictions,
+  catalogItem, canonicalId,
+} from '../core/foods.js';
+import { buildIndex, searchFoods, computeBatch, batchPortion, energyMismatch, fromRow, BATCH_SHELF_DAYS } from '../core/fooddb.js';
 import { macrosFor, dayTotals, closenessWord } from '../core/nutrition.js';
 import { dailyWeights, emaTrend } from '../core/trend.js';
 import { restrictions } from '../core/safety.js';
@@ -35,22 +39,120 @@ export function createServices(store, llm) {
   S.onboarded = () => !!S.profile()?.onboardedAt;
   S.saveProfile = (patch) => store.put('profile', { ...S.profile(), ...patch, id: 'me' });
 
-  // ── Каталог: своя база + свои продукты (штрих-код, вручную) + свои блюда
+  // ── Каталог: CoFID + свои продукты (вручную, штрих-код) + свои блюда + заготовки. Пересобирается, когда что-то из них меняется.
   S.customFoods = () => store.all('foods');
+  let catCache = null;
+  const catSig = () => [store.all('foods').length, store.all('dishes').length, ...store.all('batches', { withDeleted: true }).map((b) => b.updatedAt || 0),
+    store.all('foodEntries').filter((e) => e.refType === 'batch').length, JSON.stringify(S.settings().foodAliases || {})].join('|');
   S.catalogById = () => {
+    const sig = catSig();
+    if (catCache?.sig === sig) return catCache.byId;
     const m = { ...CATALOG_BY_ID };
-    for (const f of S.customFoods()) m[f.id] = f;
-    const foods = { ...FOODS_BY_ID, ...Object.fromEntries(S.customFoods().map((f) => [f.id, f])) };
-    for (const d of store.all('dishes')) m[d.id] = resolveDish(d, foods);
+    for (const f of S.customFoods()) m[f.id] = { ready: true, ...f };
+    for (const d of store.all('dishes')) m[d.id] = resolveDish(d, m);
+    for (const b of S.batches({ active: true })) m['batch:' + b.id] = batchItem(b);
+    const list = Object.values(m).filter((x) => x.id !== 'x:water' && !x.legacy);
+    catCache = { sig, byId: m, list, index: buildIndex(list, { ...SEED_ALIASES, ...(S.settings().foodAliases || {}) }) };
     return m;
   };
-  S.catalog = () => {
-    const m = S.catalogById();
-    return Object.values(m).filter((x) => x.id !== 'f:water');
-  };
+  S.ref = (id) => (id ? catalogItem(id, S.catalogById()) : null);
+  S.catalog = () => (S.catalogById(), catCache.list);
   S.excluded = () => excludedTags(S.profile());
   S.allowed = (ref) => allowedByRestrictions(ref, S.excluded());
-  S.search = (q) => searchCatalog(q, S.catalog().filter(S.allowed));
+  // Поиск: префиксы, синонимы (базовые и свои), сначала привычное. pool — только то, что годится в стек.
+  S.usage = () => {
+    const u = {};
+    for (const e of store.all('foodEntries')) if (e.refId) u[canonicalId(e.refId)] = (u[canonicalId(e.refId)] || 0) + 1;
+    return u;
+  };
+  S.search = (q, { pool = false, limit = 20 } = {}) => {
+    S.catalogById();
+    const ex = S.excluded();
+    return searchFoods(q, catCache.index, { limit, usage: S.usage(), filter: (x) => allowedByRestrictions(x, ex) && (!pool || x.ready) && x.kind !== 'batch' });
+  };
+  S.foodRow = (code) => ROW_BY_CODE.get(code) || null;
+
+  // Свой продукт: обязательны название и КБЖУ на 100 г; баланс энергии проверяется (допуск 10%)
+  S.checkCustomFood = (f) => energyMismatch(f);
+  S.addCustomFood = async ({ name, kcal, p, f, c, fiber = 0, portion = 100, meals = ['any'] }) => {
+    if (!name?.trim() || !(kcal >= 0) || [p, f, c].some((x) => !(x >= 0))) throw new Error('нужны название, ккал, белки, жиры и углеводы');
+    return store.put('foods', {
+      id: 'user:' + uid(), kind: 'food', name: name.trim(), kcal, p, f, c, fiber, nova: null, tags: [], meals, portion,
+      unit: null, prepMin: 0, cost: 2, aliases: [], ready: true, source: 'user', sourceVersion: null,
+    });
+  };
+
+  // Свои синонимы поиска: {фраза: [id]}
+  S.userAliases = () => S.settings().foodAliases || {};
+  S.addAlias = async (phrase, id) => {
+    const k = phrase.trim().toLowerCase();
+    if (!k) return;
+    const a = { ...S.userAliases() };
+    a[k] = [...new Set([...(a[k] || []), id])];
+    await S.saveSettings({ foodAliases: a });
+  };
+  S.removeAlias = async (phrase) => {
+    const a = { ...S.userAliases() };
+    delete a[phrase];
+    await S.saveSettings({ foodAliases: a });
+  };
+
+  // Старые id продуктов (до CoFID) → коды базы: пул, свои блюда, планы с сегодняшнего дня. Записи еды — снимки, их не трогаем.
+  S.migrateFoods = async () => {
+    const meta = { id: 'foods', ...store.get('meta', 'foods') };
+    if ((meta.refsVersion || 0) < 2) {
+      for (const p of store.all('pool')) {
+        const to = LEGACY_MAP[p.refId];
+        if (!to) continue;
+        const dup = store.all('pool').some((q) => q.id !== p.id && q.refId === to && q.active !== false);
+        await store.put('pool', { ...p, refId: to, name: CATALOG_BY_ID[to]?.name || p.name, legacyId: p.refId, active: dup ? false : p.active });
+      }
+      for (const d of store.all('dishes')) await store.put('dishes', { ...d, comp: d.comp.map(([fid, g]) => [canonicalId(fid.includes(':') ? fid : 'f:' + fid), g]) });
+      for (const plan of store.all('dayPlans').filter((x) => x.day >= today())) {
+        await store.put('dayPlans', { ...plan, items: plan.items.map((i) => ({ ...i, refId: canonicalId(i.refId) })) });
+      }
+      meta.refsVersion = 2;
+    }
+    if (meta.seedVersion !== SEED_VERSION) {
+      meta.prevSeedVersion = meta.seedVersion || null;
+      meta.seedVersion = SEED_VERSION;
+      meta.seedSeenAt = Date.now();
+    }
+    await store.put('meta', meta);
+  };
+  S.foodsMeta = () => store.get('meta', 'foods') || {};
+
+  // ── Заготовки: партия из сырых ингредиентов; остаток = выход − записанные порции
+  S.batches = ({ active = false, day = today() } = {}) => store.all('batches')
+    .filter((b) => !active || (!b.finishedAt && b.expiresAt >= day && S.batchRemaining(b) >= 30))
+    .sort((a, b) => (a.expiresAt < b.expiresAt ? -1 : 1));
+  S.batchRemaining = (b) => {
+    const eaten = store.all('foodEntries').filter((e) => e.refId === 'batch:' + b.id).reduce((s, e) => s + (e.grams || 0), 0);
+    return Math.max(0, Math.round(b.cookedTotalG - eaten));
+  };
+  S.previewBatch = ({ inputs, weighedG }) => computeBatch({ inputs, weighedG }, (c) => S.foodRow(c), ROWS_BY_RAW);
+  S.saveBatch = async ({ id, name, inputs, weighedG, storage = 'fridge', meals = ['lunch', 'dinner'], portionG = 250, cookedAt = today() }) => {
+    const r = S.previewBatch({ inputs, weighedG });
+    if (!r.cookedTotalG) throw new Error('добавь ингредиенты');
+    const rows = inputs.map((i) => S.foodRow(i.code)).filter(Boolean);
+    const tags = [...new Set(rows.flatMap((row) => fromRow(row).tags))];
+    const nova = Math.max(1, ...rows.map((row) => row.nova_guess || 1));
+    const prev = id ? store.get('batches', id) : null;
+    return store.put('batches', {
+      ...(prev || {}), name: name?.trim() || 'Заготовка', cookedAt, inputs, weighedG: weighedG || null, storage, meals, portionG,
+      expiresAt: prev?.expiresAt && prev.storage === storage ? prev.expiresAt : addDays(cookedAt, BATCH_SHELF_DAYS[storage] || 4),
+      cookedTotalG: r.cookedTotalG, confidence: r.confidence, needsWeighing: r.needsWeighing, totals: r.totals, per100: r.per100, tags, nova,
+    });
+  };
+  S.finishBatch = (id) => store.put('batches', { ...store.get('batches', id), finishedAt: Date.now() });
+  const batchItem = (b) => {
+    const left = S.batchRemaining(b);
+    return {
+      id: 'batch:' + b.id, kind: 'batch', batchId: b.id, name: `${b.name} (заготовка)`, ...b.per100, nova: b.nova ?? null, tags: b.tags || [],
+      meals: b.meals || ['lunch', 'dinner'], portion: Math.max(10, Math.min(b.portionG || 250, left)), unit: null, prepMin: 0, cost: 1,
+      aliases: [], ready: true, source: 'заготовка', expiresAt: b.expiresAt, remainingG: left, batchConfidence: b.confidence,
+    };
+  };
 
   // ── Цель, фаза, состояние модели
   S.goal = () => store.all('goals').sort((a, b) => b.createdAt - a.createdAt)[0] || null;
@@ -91,32 +193,49 @@ export function createServices(store, llm) {
 
   // ── Пул
   S.pool = ({ all = false } = {}) => store.all('pool').filter((p) => all || p.active !== false);
-  S.poolRefs = () => {
-    const cat = S.catalogById();
-    return S.pool().map((p) => cat[p.refId]).filter(Boolean);
-  };
+  S.poolRefs = () => S.pool().map((p) => S.ref(p.refId)).filter(Boolean);
   S.poolWarnings = () => poolWarnings(S.poolRefs().filter(S.allowed));
   S.addToPool = async (refId, grams, from = 'manual') => {
+    refId = canonicalId(refId);
     const ex = store.all('pool').find((p) => p.refId === refId);
-    const ref = S.catalogById()[refId];
+    const ref = S.ref(refId);
     if (ex) return store.put('pool', { ...ex, active: true, deleted: false });
     return store.put('pool', { refId, name: ref?.name || refId, grams: grams || ref?.portion || 100, priority: 0, replaceCount: 0, eatenCount: 0, active: true, from });
   };
   S.setPoolActive = (id, active) => store.put('pool', { ...store.get('pool', id), active });
-  S.builderItems = () => {
-    const cat = S.catalogById();
-    return S.pool().map((p) => ({ p, ref: cat[p.refId] })).filter((x) => x.ref && S.allowed(x.ref)).map((x) => builderItem(x.p, x.ref));
+  // Пул + активные заготовки; заготовки — в приоритете, и тем выше, чем ближе срок
+  S.builderItems = (day = today()) => {
+    const items = S.pool().map((p) => ({ p, ref: S.ref(p.refId) })).filter((x) => x.ref && S.allowed(x.ref)).map((x) => builderItem(x.p, x.ref));
+    for (const b of S.batches({ active: true, day })) {
+      const ref = batchItem(b);
+      if (!S.allowed(ref)) continue;
+      const daysLeft = Math.max(0, daysBetween(day, b.expiresAt));
+      const it = builderItem({ id: ref.id, grams: ref.portion, priority: 10 + 2 * Math.max(0, 5 - daysLeft) }, ref);
+      it.hi = Math.max(it.step, Math.min(it.hi, Math.floor(ref.remainingG / it.step) * it.step));
+      it.lo = Math.min(it.lo, it.hi);
+      it.batch = true;
+      items.push(it);
+    }
+    return items;
   };
 
   // ── Еда
   S.entries = (day = today()) => store.byDay('foodEntries', day).sort((a, b) => a.ts - b.ts);
   S.totals = (day = today()) => dayTotals(S.entries(day));
+  // Запись — снимок нутриентов на момент записи: обновление базы историю не переписывает
   S.makeEntry = ({ refId, grams, method, confidence, planItemId = null, day = today(), name }) => {
-    const ref = S.catalogById()[refId];
+    const ref = S.ref(refId);
     if (!ref) throw new Error('нет такого продукта: ' + refId);
+    const batch = ref.kind === 'batch' ? store.get('batches', ref.batchId) : null;
+    const lowPrecision = ref.kcal == null || !!ref.lowPrecision;
+    let conf = confidence ?? CONFIDENCE.search;
+    if (lowPrecision) conf = Math.min(conf, CONFIDENCE.approx);
+    if (batch?.confidence === 'low') conf = Math.min(conf, CONFIDENCE.llm);
     return {
-      day, ts: Date.now(), refType: ref.kind || 'food', refId, name: name || ref.name, grams,
-      ...macrosFor(ref, grams), nova: ref.nova ?? null, confidence: confidence ?? CONFIDENCE.search, method, planItemId,
+      day, ts: Date.now(), refType: ref.kind || 'food', refId: ref.id, name: name || ref.name, grams,
+      ...(batch ? batchPortion(batch, grams) : macrosFor(ref, grams)), nova: ref.nova ?? null, confidence: conf, method, planItemId,
+      foodCode: ref.kind === 'food' ? ref.id : null, source: ref.source || null, sourceVersion: ref.sourceVersion || null,
+      ...(lowPrecision ? { lowPrecision: true } : {}),
     };
   };
   S.makeApprox = ({ kcal, day = today(), name = 'Примерно', planItemId = null }) => ({
@@ -136,10 +255,10 @@ export function createServices(store, llm) {
   };
   S.recentFoods = (limit = 8) => {
     const from = addDays(today(), -30);
-    const es = store.all('foodEntries').filter((e) => e.day >= from && e.refId);
-    const g = groupBy(es, (e) => e.refId);
+    const es = store.all('foodEntries').filter((e) => e.day >= from && e.refId && e.refType !== 'batch' && S.ref(e.refId));
+    const g = groupBy(es, (e) => S.ref(e.refId).id);
     return [...g.entries()]
-      .map(([refId, list]) => ({ refId, name: list[0].name, grams: list.sort((a, b) => b.ts - a.ts)[0].grams, count: list.length }))
+      .map(([refId, list]) => ({ refId, name: S.ref(refId).name, grams: list.sort((a, b) => b.ts - a.ts)[0].grams, count: list.length }))
       .sort((a, b) => b.count - a.count)
       .slice(0, limit);
   };
@@ -171,7 +290,7 @@ export function createServices(store, llm) {
   };
   S.buildDayPlan = async (day, { save = true } = {}) => {
     const st = S.modelState();
-    const items = S.builderItems();
+    const items = S.builderItems(day);
     if (!st || !items.length) return null;
     const t = S.totals(day);
     const s = buildStack({ targets: targetsOf(st), eaten: t, items, history: historyMap(day), day, cookMin: cookMin(day), poolSize: items.length });
@@ -197,7 +316,7 @@ export function createServices(store, llm) {
     plan.stateId = st.id;
     if (!open.length) return store.put('dayPlans', { ...plan, status: 'closed' });
     const s = buildStack({
-      targets: targetsOf(st), eaten, items: S.builderItems(), history: historyMap(day), day, cookMin: cookMin(day),
+      targets: targetsOf(st), eaten, items: S.builderItems(day), history: historyMap(day), day, cookMin: cookMin(day),
       slots: open.map((i) => i.slot), seed: open.map((i) => i.poolItemId), lock: open.filter((i) => i.chosen).map((i) => i.poolItemId),
       // от чего сегодня отказались («не хочу это»), обратно не предлагаем
       exclude: plan.items.filter((i) => i.status === 'swapped').map((i) => i.poolItemId),
@@ -256,13 +375,14 @@ export function createServices(store, llm) {
     const plan = S.dayPlan(day);
     const open = plan.items.filter((i) => i.status === 'plan');
     const idx = open.findIndex((i) => i.id === itemId);
-    return swapOptions({ targets: targetsOf(S.modelState()), eaten: S.totals(day), items: S.builderItems(), openPlan: open, index: idx });
+    return swapOptions({ targets: targetsOf(S.modelState()), eaten: S.totals(day), items: S.builderItems(day), openPlan: open, index: idx });
   };
   S.swapItem = async (day, itemId, poolItemId) => {
     const plan = S.dayPlan(day);
     const old = plan.items.find((i) => i.id === itemId);
-    const ref = S.catalogById()[store.get('pool', poolItemId).refId];
-    const neu = { id: uid(), poolItemId, refId: ref.id, name: ref.name, slot: old.slot, grams: store.get('pool', poolItemId).grams, status: 'plan', chosen: true, foodEntryIds: [] };
+    const pi = store.get('pool', poolItemId);
+    const ref = S.ref(pi ? pi.refId : poolItemId);
+    const neu = { id: uid(), poolItemId, refId: ref.id, name: ref.name, slot: old.slot, grams: pi?.grams || ref.portion, status: 'plan', chosen: true, foodEntryIds: [] };
     await store.put('dayPlans', { ...plan, items: [...plan.items.map((i) => (i.id === itemId ? { ...i, status: 'swapped' } : i)), neu] });
     await bumpPool(old.poolItemId, 'replaceCount');
     await S.rebuild(day);
@@ -293,7 +413,8 @@ export function createServices(store, llm) {
       goal: S.goal(),
       phase: S.phase(),
       weights: store.all('weights'),
-      foodEntries: store.all('foodEntries'),
+      // заготовки — не кандидаты в пул; старые id — к кодам базы
+      foodEntries: store.all('foodEntries').map((e) => ({ ...e, refId: e.refType === 'batch' ? null : canonicalId(e.refId) })),
       checkins: store.all('checkins'),
       sets: store.all('sets'),
       sessions: store.all('sessions').filter((s) => s.finishedAt),

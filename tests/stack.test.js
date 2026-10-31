@@ -5,13 +5,13 @@ import { CATALOG } from '../js/core/foods.js';
 import { macroTargets } from '../js/core/nutrition.js';
 import { rng, addDays } from '../js/core/util.js';
 
-import { poolRole } from '../js/core/pool.js';
+import { poolRole, isStaple, poolWarnings, poolCandidates } from '../js/core/pool.js';
 
 const main = (x) => x.meals.includes('lunch') || x.meals.includes('dinner');
 
-// Сбалансированный пул, как у живого человека: на каждые 10 позиций — 2 белковых и 2 углеводных основных,
-// 2 завтрака, перекус, калорийная добавка (хлеб, орехи, сыр, масло) и 2 любых.
-// Пул без углеводов или жиров не соберёт бюджет в принципе — приложение предупреждает о нём на онбординге.
+// Сбалансированный пул, как у живого человека: на каждые 10 позиций — 2 белковых основных, 2 сытных гарнира,
+// 2 завтрака, перекус, калорийная добавка (орехи, сыр, масло) и 2 любых.
+// Пул без гарниров или жиров не соберёт бюджет в принципе — приложение предупреждает о нём на онбординге.
 export function syntheticPool(r, n) {
   const pick = new Map();
   const take = (list, k) => {
@@ -25,7 +25,7 @@ export function syntheticPool(r, n) {
   };
   const q = n / 10;
   take(CATALOG.filter((x) => main(x) && poolRole(x) === 'protein'), Math.round(2 * q));
-  take(CATALOG.filter((x) => main(x) && poolRole(x) === 'carb'), Math.round(2 * q));
+  take(CATALOG.filter((x) => main(x) && isStaple(x)), Math.round(2 * q));
   take(CATALOG.filter((x) => x.meals.includes('breakfast')), Math.round(2 * q));
   take(CATALOG.filter((x) => x.meals.includes('snack') && x.kcal >= 40), Math.round(q));
   take(CATALOG.filter((x) => poolRole(x) === 'fat'), Math.round(q));
@@ -63,7 +63,7 @@ for (const n of [10, 20, 40]) {
     note(`в допуске ${(r.share * 100).toFixed(1)}% из 300 синтетических дней; худшее отклонение ${(r.worst * 100).toFixed(0)}%` +
       (n === 10 ? ` — критерий ТЗ ≥ 95%: ${r.share >= 0.95 ? 'выполнен' : 'не выполнен'}` : ''));
     // порог теста — защита от регрессии; критерий приёмки ТЗ (95% на пуле 10) показан в заметке
-    assert(r.share >= (n === 10 ? 0.88 : 0.95), `только ${(r.share * 100).toFixed(1)}%`);
+    assert(r.share >= (n === 10 ? 0.93 : 0.95), `только ${(r.share * 100).toFixed(1)}%`);
   });
 }
 
@@ -127,4 +127,17 @@ test('«не хочу это»: варианты того же приёма пи
   assert(opts.length > 0, 'нет вариантов');
   assert(!opts.some((o) => o.poolItemId === s.items[0].poolItemId));
   for (let i = 1; i < opts.length; i++) assert(opts[i].score >= opts[i - 1].score);
+});
+
+test('пул: без сытных гарниров — предупреждение, типовой пул онбординга — без него', () => {
+  const byId = Object.fromEntries(CATALOG.map((x) => [x.id, x]));
+  const typical = poolCandidates({ allergies: [], dietExclusions: [] });
+  const w0 = poolWarnings(typical);
+  assert(!w0.some((w) => w.includes('гарнир')), w0.join('; '));
+  // белок есть, «углеводы» — только бобовые и горошек
+  const beans = CATALOG.filter((x) => x.category === 'Бобовые' && poolRole(x) === 'carb').slice(0, 3);
+  const pool = [...typical.filter((x) => !isStaple(x) && poolRole(x) !== 'mixed' && poolRole(x) !== 'carb'), ...beans];
+  assert(beans.length >= 2, 'нет бобовых в базе');
+  assert(poolWarnings(pool).some((w) => w.includes('гарнир')), 'нет предупреждения');
+  assert(isStaple(byId['11-862']) || isStaple(byId['calc:11-006']), 'рис/гречка — гарнир');
 });

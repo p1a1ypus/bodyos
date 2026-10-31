@@ -64,9 +64,13 @@ test('разгрузка: план сессии с объёмом ×0.5', () => 
   for (const [i, e] of s.exercises.entries()) eq(e.sets.length, Math.ceil(program.days[0].exercises[i].sets * 0.5));
 });
 
-test('список покупок: блюда раскладываются на продукты, крупа — в сухом весе', () => {
-  const list = shoppingList([{ items: [{ refId: 'd:buckwheat_chicken', grams: 325 }, { refId: 'f:apple', grams: 180 }] }]);
-  const buck = list.find((x) => x.refId === 'f:buckwheat');
-  assert(buck && buck.grams === 80 && buck.note === 'сырой вес', JSON.stringify(buck));
-  assert(list.find((x) => x.refId === 'f:apple').grams === 180);
+test('список покупок: блюда раскладываются на продукты, готовое → сырой вес по коэффициенту выхода', () => {
+  const list = shoppingList([{ items: [{ refId: 'd:buckwheat_chicken', grams: 325 }, { refId: '14-319', grams: 180 }, { refId: '11-862', grams: 279 }] }]);
+  const buck = list.find((x) => x.refId === '11-006'); // 200 г варёной гречки / 3,0
+  assert(buck && buck.grams === 70 && buck.note === 'сырой вес', JSON.stringify(buck));
+  const rice = list.find((x) => x.refId === '11-861'); // пара из базы: 279 / 2,79
+  assert(rice && rice.grams === 100, JSON.stringify(rice));
+  const chicken = list.find((x) => x.refId === '18-323'); // пары нет: типовой 0,72
+  assert(chicken && chicken.grams === 170 && chicken.note.includes('примерно'), JSON.stringify(chicken));
+  assert(list.find((x) => x.refId === '14-319').grams === 180);
 });

@@ -57,7 +57,6 @@ export async function moreView(ctx) {
     restr.forceNoNumbers ? h('p', { class: 'hint' }, 'Включён принудительно из-за ответов в онбординге.') : null));
 
   // Пул
-  const cat = S.catalogById();
   const pool = S.pool({ all: true });
   const warnings = S.poolWarnings();
   const search = h('input', { placeholder: 'Добавить в пул', value: poolQuery });
@@ -65,7 +64,7 @@ export async function moreView(ctx) {
   const drawFound = () => {
     poolQuery = search.value;
     const inPool = new Set(pool.filter((p) => p.active !== false).map((p) => p.refId));
-    found.replaceChildren(...S.search(search.value).slice(0, 8).filter((x) => !inPool.has(x.id))
+    found.replaceChildren(...S.search(search.value, { pool: true, limit: 12 }).filter((x) => !inPool.has(x.id)).slice(0, 8)
       .map((x) => h('button', { class: 'chip', onclick: async () => { await S.addToPool(x.id, x.portion); re(); } }, '+ ' + x.name)));
   };
   search.oninput = drawFound;
@@ -73,10 +72,18 @@ export async function moreView(ctx) {
   out.appendChild(h('details', { class: 'card' }, h('summary', {}, `Пул еды (${pool.filter((p) => p.active !== false).length})`),
     warnings.length ? h('div', { class: 'card warn' }, warnings.map((w) => h('p', {}, '— ' + w))) : null,
     search, found,
-    pool.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru')).map((p) => h('label', { class: 'item' },
-      h('input', { type: 'checkbox', checked: p.active !== false, onchange: async (e) => { await S.setPoolActive(p.id, e.target.checked); re(); } }),
-      h('div', { class: 'grow' }, h('div', { class: 'title' }, cat[p.refId]?.name || p.name),
-        h('div', { class: 'muted' }, `порция ${p.grams} г · съедено ${p.eatenCount || 0} · заменено ${p.replaceCount || 0}${p.priority ? ` · приоритет ${p.priority}` : ''}`))))));
+    pool.sort((a, b) => (S.ref(a.refId)?.name || a.name || '').localeCompare(S.ref(b.refId)?.name || b.name || '', 'ru')).map((p) => {
+      const it = S.ref(p.refId);
+      return h('label', { class: 'item' },
+        h('input', { type: 'checkbox', checked: p.active !== false, onchange: async (e) => { await S.setPoolActive(p.id, e.target.checked); re(); } }),
+        h('div', { class: 'grow' }, h('div', { class: 'title' }, it?.name || p.name),
+          h('div', { class: 'muted' }, `порция ${p.grams} г · съедено ${p.eatenCount || 0} · заменено ${p.replaceCount || 0}${p.priority ? ` · приоритет ${p.priority}` : ''}${it?.legacy ? ' · старая база, значения примерные' : ''}`)));
+    })));
+
+  // База продуктов
+  out.appendChild(h('div', { class: 'card' }, h('div', { class: 'row between' },
+    h('span', {}, h('b', {}, 'База продуктов'), h('br'), h('span', { class: 'muted' }, `CoFID 2021 · свои продукты: ${S.customFoods().filter((f) => f.source === 'user').length} · свои синонимы: ${Object.keys(S.userAliases()).length}`)),
+    h('button', { class: 'btn small', onclick: () => ctx.go('data') }, 'О данных'))));
 
   // LLM
   const L = { ...settings.llm };
@@ -100,7 +107,7 @@ export async function moreView(ctx) {
       } }, 'Сохранить'),
       h('button', { class: 'btn', onclick: async () => {
         try {
-          const r = await ctx.llm.parseFood('два яйца и кофе', S.catalog().slice(0, 40));
+          const r = await ctx.llm.parseFood('два яйца и кофе');
           toast(`Работает: ${r.map((x) => x.name).join(', ')}`, 4000);
         } catch (e) {
           toast('Не работает: ' + e.message, 5000);

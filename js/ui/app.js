@@ -2,7 +2,7 @@
 import { Store } from '../data/db.js';
 import { createLLM } from '../llm/llm.js';
 import { createServices } from '../app/services.js';
-import { h, toast } from './dom.js';
+import { h, toast, icon } from './dom.js';
 import { onboardingView } from './views/onboarding.js';
 import { todayView } from './views/today.js';
 import { checkinView } from './views/checkin.js';
@@ -11,6 +11,8 @@ import { trainView } from './views/train.js';
 import { weekView } from './views/week.js';
 import { labsView } from './views/labs.js';
 import { moreView } from './views/more.js';
+import { batchView } from './views/batch.js';
+import { dataView } from './views/data.js';
 
 const ROUTES = {
   '': todayView,
@@ -21,10 +23,16 @@ const ROUTES = {
   week: weekView,
   labs: labsView,
   more: moreView,
+  batch: batchView,
+  data: dataView,
 };
+// экраны без своей вкладки подсвечивают родительскую
+const TAB_OF = { data: 'more' };
 
 const root = document.getElementById('app');
 const tabs = document.getElementById('tabs');
+const TAB_ICONS = { '': 'today', train: 'train', week: 'week', labs: 'labs', more: 'more' };
+for (const a of tabs.querySelectorAll('a')) a.prepend(icon(TAB_ICONS[a.dataset.r]));
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
@@ -42,6 +50,11 @@ async function boot() {
   });
   S = createServices(store, llm);
   window.__bodyos = { store, S, llm }; // для отладки в консоли
+  try {
+    await S.migrateFoods(); // старые id продуктов → коды CoFID
+  } catch (e) {
+    console.error('migrateFoods', e);
+  }
 
   const ctx = {
     S, llm, store,
@@ -60,7 +73,7 @@ async function boot() {
       if (S.onboarded() && route === 'onboarding') route = '';
       const view = ROUTES[route] || todayView;
       tabs.hidden = route === 'onboarding';
-      for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.r === route);
+      for (const a of tabs.querySelectorAll('a')) a.classList.toggle('on', a.dataset.r === (TAB_OF[route] ?? route));
       try {
         const node = await view({ ...ctx, params });
         root.replaceChildren(node);

@@ -11,7 +11,8 @@ function sparkline(points) {
   if (points.length < 2) return null;
   const W = 300;
   const H = 60;
-  const ys = points.map((p) => p.trend);
+  // шкала по тренду и по взвешиваниям, иначе точки выше/ниже тренда уходят за край
+  const ys = points.flatMap((p) => [p.trend, p.kg]).filter((v) => v != null);
   const min = Math.min(...ys);
   const max = Math.max(...ys);
   const sx = (i) => (i / (points.length - 1)) * (W - 8) + 4;
@@ -75,8 +76,10 @@ export async function weekView(ctx) {
       noNum
         ? h('p', {}, `Бюджет недели — ${S.closeness(eaten, st.budget * passed)}.`)
         : h('div', {},
-          h('div', { class: 'bar' }, h('i', { style: { width: `${Math.min(100, (eaten / weekBudget) * 100)}%` } })),
-          h('p', { class: 'muted' }, `${Math.round(eaten)} из ${weekBudget} ккал за ${passed} дн. из 7. План на прошедшие дни — ${st.budget * passed}.`)),
+          h('div', { class: 'big' }, Math.round(eaten).toLocaleString('ru-RU')),
+          h('p', { class: 'muted', style: { marginTop: '2px' } }, `из ${weekBudget.toLocaleString('ru-RU')} ккал недели · ${passed} дн. из 7`),
+          h('div', { class: 'bar', style: { margin: '10px 0 6px' } }, h('i', { style: { width: `${Math.min(100, (eaten / weekBudget) * 100)}%` } })),
+          h('p', { class: 'muted' }, `План на прошедшие дни — ${(st.budget * passed).toLocaleString('ru-RU')} ккал.`)),
       (() => {
         const upf = ultraProcessedShare(weekEntries);
         return upf != null ? h('p', { class: 'muted' }, `Ультрапереработанные продукты (NOVA 4): ${Math.round(upf * 100)}% калорий недели.`) : null;
@@ -87,8 +90,10 @@ export async function weekView(ctx) {
   const trend = S.trend().slice(-56);
   if (trend.length >= 2 && !noNum) {
     const last = trend.at(-1);
-    out.appendChild(h('div', { class: 'card' }, h('h2', {}, 'Тренд веса'), sparkline(trend),
-      h('p', { class: 'muted' }, `Сейчас по тренду ${last.trend.toFixed(1)} кг. Линия — сглаженный тренд, точки — взвешивания.`)));
+    out.appendChild(h('div', { class: 'card' }, h('h2', {}, 'Тренд веса'),
+      h('div', { class: 'big' }, last.trend.toFixed(1).replace('.', ','), h('span', { class: 'muted', style: { fontSize: '17px', fontWeight: 500, letterSpacing: 0 } }, ' кг')),
+      sparkline(trend),
+      h('p', { class: 'muted' }, 'Линия — сглаженный тренд, точки — взвешивания.')));
   }
 
   // Еженедельный чек

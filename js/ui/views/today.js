@@ -1,13 +1,16 @@
 // Экран дня: чекин, стек дня с закрытием в один тап, замены, остаток, вопрос дня, завтра.
-import { h, toast } from '../dom.js';
+import { h, toast, icon, ring } from '../dom.js';
 import { SLOT_LABELS } from '../../core/stack.js';
 import { PHASES } from '../../core/goals.js';
 import { addDays, dayKey } from '../../core/util.js';
 
+let openMenu = null;
 let openSwap = null;
 let showWhy = false;
 
-const fmtDay = (d) => d.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+const RANK = { breakfast: 0, lunch: 1, snack: 2, dinner: 3 };
+const fmtTop = (d) => `${d.toLocaleDateString('ru-RU', { weekday: 'short' }).replace('.', '')} ${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}`;
+const fmtNum = (n) => Math.round(n).toLocaleString('ru-RU');
 
 export async function todayView(ctx) {
   const { S } = ctx;
@@ -19,6 +22,7 @@ export async function todayView(ctx) {
   const phase = S.phase();
   const msgs = S.messages();
   const fresh = msgs[0] && !msgs[0].seen ? msgs[0] : null;
+  const visible = plan ? plan.items.filter((i) => ['plan', 'eaten', 'replaced'].includes(i.status)).sort((a, b) => RANK[a.slot] - RANK[b.slot]) : [];
 
   const act = (fn) => async () => {
     try {
@@ -30,11 +34,27 @@ export async function todayView(ctx) {
   };
 
   const out = h('div', {});
-  out.appendChild(h('div', { class: 'row between' },
-    h('h1', {}, fmtDay(new Date())),
-    h('span', { class: 'muted' }, PHASES[phase?.type] || '')));
-
+  out.appendChild(h('div', { class: 'topline' }, h('span', {}, fmtTop(new Date())), h('span', {}, PHASES[phase?.type] || '')));
   if (S.restr().consultDoctor) out.appendChild(h('p', { class: 'hint' }, 'План согласуй с врачом.'));
+
+  // Главное число дня: кольцо съеденного и остаток — без оценочных слов и без красного
+  if (plan) {
+    if (noNum) {
+      const done = visible.filter((i) => i.status !== 'plan').length;
+      out.appendChild(h('div', { class: 'hero' }, ring(visible.length ? done / visible.length : 0, `${done}/${visible.length}`),
+        h('div', { class: 'grow' }, h('div', { class: 'big' }, `${done} из ${visible.length}`),
+          h('div', { class: 'muted' }, `позиций стека · белок — ${S.closeness(totals.p, plan.macros.p)}, бюджет — ${S.closeness(totals.kcal, plan.budget)}`))));
+    } else {
+      const left = plan.budget - totals.kcal;
+      const share = totals.kcal / plan.budget;
+      const pLeft = Math.max(0, Math.round(plan.macros.p - totals.p));
+      out.appendChild(h('div', { class: 'hero' }, ring(share, `${Math.round(share * 100)}%`),
+        h('div', { class: 'grow' },
+          h('div', { class: 'big' }, fmtNum(Math.abs(left))),
+          h('div', { class: 'muted' }, left >= 0 ? `ккал осталось · белок ${pLeft} г` : 'ккал сверх плана — недельный бюджет это учтёт'),
+          h('div', { class: 'hint' }, `цель по белку ${plan.macros.pMin}–${plan.macros.pMax} г`))));
+    }
+  }
 
   if (!S.checkin(day)) {
     out.appendChild(h('div', { class: 'card accent' },
@@ -47,59 +67,46 @@ export async function todayView(ctx) {
       h('span', {}, 'Готова сводка недели'), h('button', { class: 'btn small', onclick: () => ctx.go('week') }, 'Открыть'))));
   }
 
-  // Стек дня
-  const stack = h('div', { class: 'card' });
-  stack.appendChild(h('div', { class: 'row between' }, h('h2', {}, 'Стек дня'),
+  // Стек дня: позиция закрывается одним тапом по галочке, остальное — под «⋯»
+  out.appendChild(h('div', { class: 'section' }, h('span', { class: 'tag' }, 'Стек дня'),
     plan?.status === 'closed' ? h('span', { class: 'muted' }, 'закрыт') : null));
-  if (!plan) {
-    stack.appendChild(h('p', { class: 'muted' }, 'Пул пуст — добавь позиции в разделе «Ещё».'));
-  } else {
-    const rank = { breakfast: 0, lunch: 1, snack: 2, dinner: 3 };
-    const visible = plan.items.filter((i) => ['plan', 'eaten', 'replaced'].includes(i.status)).sort((a, b) => rank[a.slot] - rank[b.slot]);
-    if (!visible.length) stack.appendChild(h('p', { class: 'muted' }, 'На сегодня позиций нет — остаток закрыт.'));
-    for (const it of visible) {
-      const done = it.status !== 'plan';
-      const row = h('div', { class: 'item' + (done ? ' done' : '') },
-        h('div', { class: 'grow' },
-          h('div', { class: 'tag' }, SLOT_LABELS[it.slot]),
-          h('div', { class: 'title' }, it.status === 'replaced' ? h('s', {}, it.name) : it.name),
-          h('div', { class: 'muted' }, `${it.grams} г` + (noNum ? '' : ` · ${it.kcal} ккал · Б ${Math.round(it.p)} г`),
-            it.status === 'replaced' ? ' · заменено фактом' : '')),
-        it.status === 'plan'
-          ? h('button', { class: 'btn primary small', onclick: act(() => S.closeItem(day, it.id)) }, '✓ По плану')
-          : it.status === 'eaten' ? h('button', { class: 'btn ghost small', onclick: act(() => S.undoItem(day, it.id)) }, 'Отменить') : null);
-      stack.appendChild(row);
-      if (it.status === 'plan') {
-        stack.appendChild(h('div', { class: 'row', style: { marginBottom: '6px' } },
-          h('button', { class: 'btn ghost small', onclick: () => ctx.go(`food?plan=${it.id}`) }, 'Было другое'),
-          h('button', { class: 'btn ghost small', onclick: () => { openSwap = openSwap === it.id ? null : it.id; ctx.refresh(); } }, 'Не хочу это'),
-          h('button', { class: 'btn ghost small', onclick: act(() => S.skipItem(day, it.id)) }, 'Пропущу')));
-        if (openSwap === it.id) {
-          const opts = S.swapOptions(day, it.id);
-          stack.appendChild(h('div', { class: 'chips', style: { marginBottom: '8px' } },
-            opts.length ? opts.map((o) => h('button', { class: 'chip', onclick: act(async () => { openSwap = null; await S.swapItem(day, it.id, o.poolItemId); }) }, o.name))
-              : h('span', { class: 'muted' }, 'В пуле нет подходящих замен.')));
-        }
+  if (!plan) out.appendChild(h('p', { class: 'muted' }, 'Пул пуст — добавь позиции в разделе «Ещё».'));
+  else if (!visible.length) out.appendChild(h('p', { class: 'muted' }, 'На сегодня позиций нет — остаток закрыт.'));
+  for (const it of visible) {
+    const done = it.status !== 'plan';
+    const menu = openMenu === it.id;
+    const meta = `${it.grams} г` + (noNum ? '' : ` · ${it.kcal} ккал · Б ${Math.round(it.p)} г`) + (it.status === 'replaced' ? ' · заменено фактом' : '');
+    out.appendChild(h('div', { class: 'slot' + (done ? ' done' : '') },
+      h('div', { class: 'grow' },
+        h('div', { class: 'tag' }, SLOT_LABELS[it.slot]),
+        h('div', { class: 'name' }, it.status === 'replaced' ? h('s', {}, it.name) : it.name),
+        h('div', { class: 'meta' }, meta)),
+      it.status === 'plan' ? h('button', { class: 'more-btn' + (menu ? ' on' : ''), 'aria-label': 'Было другое, замена, пропуск', 'aria-expanded': String(menu), onclick: () => {
+        openMenu = menu ? null : it.id;
+        openSwap = null;
+        ctx.refresh();
+      } }, icon('dots')) : null,
+      it.status === 'plan'
+        ? h('button', { class: 'check', 'aria-label': `Съел по плану: ${it.name}`, onclick: act(() => S.closeItem(day, it.id)) }, icon('check'))
+        : it.status === 'eaten' ? h('button', { class: 'check done', 'aria-label': `Отменить: ${it.name}`, onclick: act(() => S.undoItem(day, it.id)) }, icon('check')) : null));
+    if (menu) {
+      out.appendChild(h('div', { class: 'slot-actions' },
+        h('button', { class: 'chip', onclick: () => ctx.go(`food?plan=${it.id}`) }, 'Было другое'),
+        h('button', { class: 'chip' + (openSwap === it.id ? ' on' : ''), onclick: () => { openSwap = openSwap === it.id ? null : it.id; ctx.refresh(); } }, 'Не хочу это'),
+        h('button', { class: 'chip', onclick: act(() => { openMenu = null; return S.skipItem(day, it.id); }) }, 'Пропущу')));
+      if (openSwap === it.id) {
+        const opts = S.swapOptions(day, it.id);
+        out.appendChild(h('div', { class: 'slot-actions' },
+          opts.length ? opts.map((o) => h('button', { class: 'chip', onclick: act(async () => { openMenu = null; openSwap = null; await S.swapItem(day, it.id, o.poolItemId); }) }, `→ ${o.name}`))
+            : h('span', { class: 'muted' }, 'В пуле нет подходящих замен.')));
       }
     }
   }
 
-  // Остаток — без оценочных слов и без красного
   if (plan) {
-    const left = plan.budget - totals.kcal;
-    const pLeft = plan.macros.p - totals.p;
-    let line;
-    if (noNum) {
-      line = `Белок — ${S.closeness(totals.p, plan.macros.p)}, бюджет — ${S.closeness(totals.kcal, plan.budget)}.`;
-    } else if (left >= 0) {
-      line = `Осталось ${left} ккал, белок ${Math.max(0, Math.round(pLeft))} г (цель ${plan.macros.pMin}–${plan.macros.pMax} г).`;
-    } else {
-      line = `Сверх плана ${-left} ккал. Недельный бюджет это учтёт.`;
-    }
-    stack.appendChild(h('p', { class: 'muted', style: { marginTop: '8px' } }, line));
-    stack.appendChild(h('div', { class: 'row' },
-      h('button', { class: 'btn', onclick: () => ctx.go('food') }, '+ Добавить еду'),
-      h('button', { class: 'btn ghost small', onclick: () => { showWhy = !showWhy; ctx.refresh(); } }, 'Почему так?')));
+    out.appendChild(h('div', { class: 'row', style: { marginTop: '10px' } },
+      h('button', { class: 'btn grow', onclick: () => ctx.go('food') }, icon('plus'), 'Добавить еду'),
+      h('button', { class: 'btn ghost', onclick: () => { showWhy = !showWhy; ctx.refresh(); } }, 'Почему так?')));
     if (showWhy) {
       const box = h('div', { class: 'card' }, S.explainBudget().map((l) => h('p', {}, l)));
       if (ctx.llm.available()) {
@@ -116,10 +123,9 @@ export async function todayView(ctx) {
         } }, 'Спросить')));
         box.appendChild(ans);
       }
-      stack.appendChild(box);
+      out.appendChild(box);
     }
   }
-  out.appendChild(stack);
 
   // Записи вне стека
   // позиции «по плану» уже видны в стеке; здесь — всё остальное, включая факты-замены

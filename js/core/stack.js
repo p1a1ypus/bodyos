@@ -149,7 +149,7 @@ export function buildStack(args) {
   // тогда завтра она снова доступна. Приоритет — допуск сегодняшнего дня.
   const extra = [];
   for (const it of s.items) {
-    if (!yesterday.has(it.poolItemId)) continue;
+    if (!yesterday.has(it.poolItemId) || it.poolItemId.startsWith('batch:')) continue;
     const trial = buildOnce({ ...args, exclude: [...(args.exclude || []), ...extra, it.poolItemId] });
     if (!trial.closed && withinTolerance(trial.deviation) && trial.items.length >= STACK.minItems) {
       extra.push(it.poolItemId);
@@ -174,7 +174,8 @@ function buildOnce({ targets, eaten = { kcal: 0, p: 0, f: 0 }, items, history = 
   const y2 = new Set(history[addDays(day, -2)] || []);
   const ex = new Set(exclude);
   let cand = items.filter((it) => !ex.has(it.id));
-  if (size >= STACK.repeatRuleMinPool) cand = cand.filter((it) => !(y1.has(it.id) && y2.has(it.id)));
+  // правило повторов не касается заготовок: их и готовят, чтобы есть несколько дней
+  if (size >= STACK.repeatRuleMinPool) cand = cand.filter((it) => it.batch || !(y1.has(it.id) && y2.has(it.id)));
   const quick = cand.filter((it) => it.prepMin <= cookMin);
   const pool = (slot) => {
     const q = quick.filter((it) => eligible(it, slot));
@@ -185,7 +186,7 @@ function buildOnce({ targets, eaten = { kcal: 0, p: 0, f: 0 }, items, history = 
   let slotList = slots ? [...slots] : MAIN_SLOTS.filter((s) => pool(s).length);
   if (!slotList.length) slotList = ['snack'];
   const shareSum = slotList.reduce((s, x) => s + SHARE[x], 0);
-  const repeatPenalty = (it) => (y1.has(it.id) ? tun.repeat : 0);
+  const repeatPenalty = (it) => (y1.has(it.id) && !it.batch ? tun.repeat : 0);
   const w = { ...BASE_W };
 
   // 1. Жадно по слотам: сначала слоты с меньшим выбором

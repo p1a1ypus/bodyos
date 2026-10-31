@@ -54,13 +54,21 @@ test('фолбэк: выключенный LLM и ошибка сети → LLMU
   assert(e2 instanceof LLMUnavailable);
 });
 
-test('без LLM: разбор по словам находит позиции и граммовку', () => {
-  const r = keywordParse('утром овсянка, днём гречка с курицей, творог 5% 200 г и 2 яйца');
+test('без LLM: разбор по словам → запрос к поиску и до 3 кандидатов, граммовка', () => {
+  const all = keywordParse('утром овсянка, днём гречка с курицей, творог 5% 200 г и 2 яйца, кефир');
+  // кефира в CoFID нет — позиция остаётся без кандидатов, чтобы человек добавил свой продукт
+  const kefir = all.find((x) => x.name === 'кефир');
+  assert(kefir && !kefir.candidates.length && kefir.matchId === null, 'ненайденное потерялось');
+  const r = all.filter((x) => x !== kefir);
   const ids = r.map((x) => x.matchId);
   assert(ids.includes('d:buckwheat_chicken'), JSON.stringify(ids));
-  assert(ids.includes('f:cottage5'), JSON.stringify(ids));
-  eq(r.find((x) => x.matchId === 'f:cottage5').grams, 200);
-  eq(r.find((x) => x.matchId === 'f:egg').grams, 110);
+  assert(r.every((x) => x.candidates.length >= 1 && x.candidates.length <= 3));
+  const tv = r.find((x) => x.candidates.some((c) => c.id === '12-174' || c.id === '12-539'));
+  assert(tv, 'творог не найден');
+  eq(tv.grams, 200);
+  const eggs = r.find((x) => x.candidates[0].category === 'Яйца');
+  assert(eggs, 'яйца не найдены');
+  eq(eggs.grams, 110);
 });
 
 test('шаблонная сводка: без цифр потерь, если сработала защита', () => {

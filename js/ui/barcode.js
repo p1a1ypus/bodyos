@@ -14,11 +14,11 @@ export async function lookupBarcode(code) {
   const kcal = n['energy-kcal_100g'] ?? (n.energy_100g ? n.energy_100g / 4.184 : null);
   if (kcal == null) return null;
   return {
-    id: 'c:' + c, kind: 'food', barcode: c,
+    id: 'off:' + c, kind: 'food', barcode: c,
     name: [p.product_name_ru || p.product_name || 'Продукт', p.brands ? `(${p.brands.split(',')[0]})` : ''].join(' ').trim(),
     kcal: Math.round(kcal), p: n.proteins_100g || 0, f: n.fat_100g || 0, c: n.carbohydrates_100g || 0, fiber: n.fiber_100g || 0,
     nova: p.nova_group || null, tags: [], meals: ['any'], portion: Math.round(p.serving_quantity || 100), unit: null,
-    prepMin: 0, cost: 2, aliases: [], source: 'Open Food Facts',
+    prepMin: 0, cost: 2, aliases: [], ready: true, source: 'OFF', sourceVersion: null,
   };
 }
 

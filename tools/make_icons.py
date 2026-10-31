@@ -1,21 +1,46 @@
-"""Временные PNG-иконки для iOS (apple-touch-icon не понимает SVG). Без зависимостей: рисуем кольцо вручную."""
+"""PNG-иконки для iOS (apple-touch-icon не понимает SVG) — как icons/icon.svg: лаймовая дуга на тёмном.
+Без зависимостей: рисуем кольцо вручную, края сглаживаем суперсэмплингом 4×4."""
+import math
 import struct
 import zlib
 from pathlib import Path
 
-GREEN = (0x2F, 0x6F, 0x4F)
-WHITE = (0xFF, 0xFF, 0xFF)
+BG = (0x12, 0x14, 0x12)
+TRACK = (0x26, 0x2A, 0x25)
+LIME = (0xC8, 0xF2, 0x5A)
+ARC = 650 / 868  # доля окружности, как stroke-dasharray в SVG
+SS = 4
+
+
+def color_at(x, y, size):
+    c = size / 2
+    r, half = size * 138 / 512, size * 28 / 512
+    dx, dy = x - c, y - c
+    d = math.hypot(dx, dy)
+    # угол от верхней точки по часовой стрелке, 0…1
+    a = (math.atan2(dx, -dy) / (2 * math.pi)) % 1
+    if abs(d - r) <= half:
+        return LIME if a <= ARC else TRACK
+    # скруглённые концы дуги
+    for t in (0.0, ARC):
+        ex, ey = c + r * math.sin(2 * math.pi * t), c - r * math.cos(2 * math.pi * t)
+        if math.hypot(x - ex, y - ey) <= half:
+            return LIME
+    return BG
 
 
 def png(size, path):
-    c = size / 2
-    r_out, r_in, r_dot = size * 0.2695, size * 0.1992, size * 0.0703
     rows = []
     for y in range(size):
         row = bytearray([0])
         for x in range(size):
-            d = ((x + 0.5 - c) ** 2 + (y + 0.5 - c) ** 2) ** 0.5
-            row += bytes(WHITE if (r_in <= d <= r_out or d <= r_dot) else GREEN)
+            acc = [0, 0, 0]
+            for sy in range(SS):
+                for sx in range(SS):
+                    col = color_at(x + (sx + 0.5) / SS, y + (sy + 0.5) / SS, size)
+                    for i in range(3):
+                        acc[i] += col[i]
+            row += bytes(round(v / SS / SS) for v in acc)
         rows.append(bytes(row))
     raw = zlib.compress(b''.join(rows), 9)
 

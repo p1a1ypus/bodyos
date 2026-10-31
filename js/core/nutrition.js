@@ -4,15 +4,15 @@ import { mean } from './util.js';
 
 const r1 = (x) => Math.round(x * 10) / 10;
 
-// food: {kcal, p, f, c, fiber} на 100 г
+// food: {kcal, p, f, c, fiber} на 100 г. Пустое значение базы (не определено) в сумме — 0, запись помечается низкой точностью.
 export function macrosFor(food, grams) {
   const k = grams / 100;
   return {
-    kcal: Math.round(food.kcal * k),
-    p: r1(food.p * k),
-    f: r1(food.f * k),
-    c: r1(food.c * k),
-    fiber: r1((food.fiber || 0) * k),
+    kcal: Math.round((food.kcal ?? 0) * k),
+    p: r1((food.p ?? 0) * k),
+    f: r1((food.f ?? 0) * k),
+    c: r1((food.c ?? 0) * k),
+    fiber: r1((food.fiber ?? 0) * k),
   };
 }
 

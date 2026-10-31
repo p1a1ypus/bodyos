@@ -1,12 +1,12 @@
 // Хранилище: IndexedDB — источник истины на устройстве. Всё — записи с меткой времени, удаление мягкое.
 // Данных одного человека мало (год ≈ несколько тысяч записей), поэтому всё держим в памяти, пишем сквозь кэш.
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2; // 2: заготовки (batches)
 
 export const STORES = [
   'profile', 'goals', 'phases', 'weights', 'checkins', 'foods', 'dishes', 'pool', 'dayPlans', 'foodEntries',
   'shopping', 'programs', 'sessionPlans', 'sessions', 'sets', 'labs', 'modelStates', 'coachMessages',
-  'health', 'measurements', 'settings', 'llmLog', 'questions', 'meta',
+  'health', 'measurements', 'settings', 'llmLog', 'questions', 'meta', 'batches',
 ];
 
 const BY_DAY = ['weights', 'checkins', 'dayPlans', 'foodEntries', 'sessions', 'sets', 'labs', 'health', 'measurements'];
@@ -57,14 +57,17 @@ export class Store {
   }
 
   async migrate() {
-    const meta = this.get('meta', 'schema') || { id: 'schema', version: SCHEMA_VERSION };
+    const saved = this.get('meta', 'schema');
+    const meta = saved ? { ...saved } : { id: 'schema', version: SCHEMA_VERSION };
     for (const m of MIGRATIONS) {
       if (m.to > meta.version) {
         await m.run(this);
         meta.version = m.to;
       }
     }
-    if (!this.get('meta', 'schema')) await this.put('meta', meta);
+    // новые хранилища создаёт onupgradeneeded, данных они не меняют — достаточно поднять номер
+    meta.version = Math.max(meta.version, SCHEMA_VERSION);
+    if (!saved || saved.version !== meta.version) await this.put('meta', meta);
   }
 
   all(store, { withDeleted = false } = {}) {

@@ -15,6 +15,13 @@ export function poolRole(x) {
 
 export const ROLE_LABELS = { protein: 'белок', carb: 'углеводы', fat: 'жиры', mixed: 'смешанные' };
 
+// Сытный гарнир: крахмал без лишнего белка и с калориями на порцию (рис, гречка, макароны, картофель, хлеб).
+// Бобовые и зелёный горошек — тоже углеводы, но с ними одними стек упирается в белок и не добирает калории.
+export function isStaple(x) {
+  const e = Math.max(1, x.kcal);
+  return poolRole(x) === 'carb' && (x.p * 4) / e < 0.2 && (x.kcal * x.portion) / 100 >= 140;
+}
+
 // Чего не хватает пулу, чтобы стек сходился: замечания для онбординга и настроек
 export function poolWarnings(refs) {
   const w = [];
@@ -24,18 +31,22 @@ export function poolWarnings(refs) {
   if (refs.length < 10) w.push(`в пуле ${refs.length} позиций — нужно минимум 10`);
   if (count('protein') < 2) w.push('мало белковых позиций (мясо, рыба, творог, яйца, бобовые)');
   if (count('carb') + count('mixed') < 2) w.push('мало источников углеводов (крупы, хлеб, картофель, фрукты)');
+  else if (refs.filter((x) => isStaple(x) || (poolRole(x) === 'mixed' && (x.kcal * x.portion) / 100 >= 350)).length < 2) {
+    w.push('мало сытных гарниров (рис, гречка, макароны, картофель, хлеб) — без них стек не доберёт калории');
+  }
   if (count('fat') + refs.filter((x) => x.kcal >= 250).length < 1) w.push('нет калорийной добавки (орехи, сыр, масло, хлеб)');
   if (!meals('breakfast')) w.push('нет позиций на завтрак');
   if (meals('lunch') + meals('dinner') < 2) w.push('мало позиций на обед и ужин');
   return w;
 }
 
+// Типовые кандидаты (коды CoFID и блюда из них)
 const TYPICAL = [
-  'f:oats', 'd:oat_banana', 'f:egg', 'd:omelet_veg', 'f:cottage5', 'd:cottage_berries', 'f:greek_yog', 'd:cheese_sandwich',
-  'd:buckwheat_chicken', 'f:chicken_breast', 'f:buckwheat', 'f:rice', 'f:potato', 'd:pasta_chicken', 'd:plov', 'd:borsch',
-  'f:cod', 'f:salmon', 'd:tuna_salad', 'd:chicken_soup', 'f:turkey', 'd:beef_potato', 'd:lentil_soup', 'f:veg_salad_oil',
-  'f:apple', 'f:banana', 'f:kefir1', 'f:walnut', 'f:bread_whole', 'f:cheese', 'd:tofu_rice', 'd:chickpea_veg', 'f:tofu',
-  'f:lentil', 'f:peanut_butter', 'd:greek_granola', 'd:syrniki_sc', 'd:cod_potato', 'd:turkey_bulgur',
+  '11-788', 'd:oat_banana', '12-940', 'd:omelet_veg', '12-174', 'd:cottage_berries', '12-555', 'd:cheese_sandwich',
+  'd:buckwheat_chicken', '18-323', 'calc:11-006', '11-862', '13-620', 'd:pasta_chicken', 'd:plov', 'd:borsch',
+  '16-373', '16-359', 'd:tuna_salad', 'd:chicken_soup', '18-356', 'd:beef_potato', 'd:lentil_soup', '13-523',
+  '14-319', '14-318', '12-184', '14-879', '11-981', '12-604', 'd:tofu_rice', 'd:chickpea_veg', '13-570',
+  '13-661', '14-892', 'd:greek_granola', '12-539', 'd:cod_potato', 'd:turkey_bulgur', '13-503',
 ];
 
 // 20–30 кандидатов: сначала то, что человек назвал, затем типовые под ограничения

@@ -3,8 +3,10 @@
 Запуск: python server.py [порт]
 """
 import http.server
+import socket
 import socketserver
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -43,7 +45,18 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+class Server6(Server):
+    address_family = socket.AF_INET6
+
+
 if __name__ == '__main__':
+    # Браузер сначала пробует localhost по IPv6 (::1); без него каждое соединение на Windows ждёт ~1 с.
+    # Слушаем только loopback обоих протоколов — в локальную сеть сервер не виден.
+    try:
+        v6 = Server6(('::1', PORT), Handler)
+        threading.Thread(target=v6.serve_forever, daemon=True).start()
+    except OSError:
+        pass
     with Server(('127.0.0.1', PORT), Handler) as httpd:
-        print(f'Body OS: http://127.0.0.1:{PORT}/', flush=True)
+        print(f'Body OS: http://localhost:{PORT}/', flush=True)
         httpd.serve_forever()

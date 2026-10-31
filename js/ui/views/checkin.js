@@ -19,7 +19,7 @@ export async function checkinView(ctx) {
     };
   }
   const d = draft;
-  const kg = num({ value: d.kg, style: { fontSize: '24px', textAlign: 'center' }, oninput: (e) => { d.kg = e.target.value; } });
+  const kg = num({ value: d.kg, class: 'weight-input', oninput: (e) => { d.kg = e.target.value; } });
   const step = (delta) => () => {
     d.kg = Math.round(((Number(d.kg) || 0) + delta) * 10) / 10;
     kg.value = d.kg;

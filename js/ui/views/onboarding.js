@@ -3,11 +3,10 @@ import { h, field, num, chips, select, toast, voiceButton, fmtDateFull } from '.
 import { GOAL_TYPES, PHASES, DEFAULT_RATE } from '../../core/goals.js';
 import { STOP_FLAG_LABELS } from '../../core/safety.js';
 import { EQUIPMENT_PROFILES, INJURIES, EXERCISES_BY_ID } from '../../core/exercises.js';
-import { ALLERGENS, DIET_EXCLUSIONS, CATALOG, searchCatalog, excludedTags, allowedByRestrictions, keywordParse as kwParse } from '../../core/foods.js';
+import { ALLERGENS, DIET_EXCLUSIONS, CATALOG, CATALOG_ALL, CATALOG_BY_ID, searchCatalog, excludedTags, allowedByRestrictions, keywordParse as kwParse } from '../../core/foods.js';
 import { poolCandidates, poolWarnings } from '../../core/pool.js';
 import { resolveProgram } from '../../core/training.js';
 import { initialModelState } from '../../core/coach.js';
-import { macrosFor } from '../../core/nutrition.js';
 import { CONFIDENCE } from '../../core/constants.js';
 import { dayKey } from '../../core/util.js';
 
@@ -72,7 +71,10 @@ export async function onboardingView(ctx) {
     save();
   };
 
-  const wrap = (title, ...body) => h('div', {}, h('div', { class: 'muted' }, `Шаг ${step + 1} из ${STEPS.length}`), h('h1', {}, title), ...body);
+  const wrap = (title, ...body) => h('div', {},
+    h('div', { class: 'topline' }, h('span', {}, `Шаг ${step + 1} из ${STEPS.length}`)),
+    h('div', { class: 'bar', style: { margin: '8px 0 4px' } }, h('i', { style: { width: `${((step + 1) / STEPS.length) * 100}%` } })),
+    h('h1', {}, title), ...body);
   const name = STEPS[step];
 
   if (name === 'goalText') {
@@ -185,29 +187,36 @@ export async function onboardingView(ctx) {
 
   if (name === 'foodText') {
     const ex = excludedTags(profileLike());
-    const allowedCatalog = CATALOG.filter((x) => allowedByRestrictions(x, ex));
+    const allowed = (x) => allowedByRestrictions(x, ex);
+    // вчерашняя еда — уже готовая, поэтому готовое выше сырого; в пул — только то, что едят как есть
+    const findAll = (q) => {
+      const r = searchCatalog(q, CATALOG_ALL, 6, { filter: allowed });
+      return [...r.filter((x) => x.ready), ...r.filter((x) => !x.ready)].slice(0, 3);
+    };
+    const findPool = (q) => searchCatalog(q, CATALOG, 1, { filter: allowed })[0] || null;
     const parse = async () => {
       let y = [];
       let u = [];
-      const useLLM = S.settings().llm.enabled;
       try {
-        if (useLLM) {
-          if (D.foodYesterday.trim()) y = await ctx.llm.parseFood(D.foodYesterday, allowedCatalog);
-          if (D.foodUsual.trim()) u = await ctx.llm.parseFood(D.foodUsual, allowedCatalog);
-        } else throw new Error('off');
+        if (!S.settings().llm.enabled) throw new Error('off');
+        const found = (list) => list.map((x) => ({ ...x, candidates: findAll(x.query) })).filter((x) => x.candidates.length);
+        if (D.foodYesterday.trim()) y = found(await ctx.llm.parseFood(D.foodYesterday));
+        if (D.foodUsual.trim()) u = found(await ctx.llm.parseFood(D.foodUsual));
       } catch {
-        y = kwParse(D.foodYesterday, allowedCatalog);
-        u = kwParse(D.foodUsual, allowedCatalog);
+        y = kwParse(D.foodYesterday, findAll).filter((x) => x.candidates.length);
+        u = kwParse(D.foodUsual, findAll).filter((x) => x.candidates.length);
       }
-      const ids = new Set(allowedCatalog.map((x) => x.id));
-      D.mentioned = [...new Set([...y, ...u].map((x) => x.matchId).filter((id) => ids.has(id)))];
-      D.yesterday = y.filter((x) => ids.has(x.matchId)).map((x) => ({ refId: x.matchId, grams: Math.round(x.grams || 100), name: x.name, confidence: Math.min(CONFIDENCE.llm, x.confidence || 0.6) }));
+      D.mentioned = [...new Set([...y, ...u].map((x) => (x.candidates[0].ready ? x.candidates[0] : findPool(x.query))?.id).filter(Boolean))];
+      D.yesterday = y.map((x) => {
+        const hit = x.candidates[0];
+        return { refId: hit.id, grams: Math.round(x.grams || hit.portion || 100), name: x.name, confidence: Math.min(CONFIDENCE.llm, x.confidence || 0.6) };
+      });
       D.candidates = [];
       rerender();
     };
     const ta1 = h('textarea', { placeholder: 'Утром овсянка с бананом, днём гречка с курицей, вечером творог…', value: D.foodYesterday, oninput: bind('foodYesterday') });
     const ta2 = h('textarea', { placeholder: 'Завтрак — яйца или каша, обед — суп и второе, ужин — рыба с овощами', value: D.foodUsual, oninput: bind('foodUsual') });
-    const cat = Object.fromEntries(CATALOG.map((x) => [x.id, x]));
+    const cat = CATALOG_BY_ID;
     return wrap('Что ты ешь',
       field('Что было в еде вчера', h('div', {}, ta1, voiceButton((t) => { D.foodYesterday = (D.foodYesterday + ' ' + t).trim(); rerender(); }))),
       field('Что обычно ешь на завтрак, обед, ужин', h('div', {}, ta2, voiceButton((t) => { D.foodUsual = (D.foodUsual + ' ' + t).trim(); rerender(); }))),
@@ -227,7 +236,7 @@ export async function onboardingView(ctx) {
       if (D.foodBudget === 'low') list = list.filter((x) => (x.cost || 2) < 3);
       D.candidates = list.map((x) => x.id);
     }
-    const cat = Object.fromEntries(CATALOG.map((x) => [x.id, x]));
+    const cat = CATALOG_BY_ID;
     const struck = new Set(D.struck);
     const ids = [...D.candidates, ...D.extraPool];
     const chosen = ids.filter((id) => !struck.has(id));
@@ -236,7 +245,7 @@ export async function onboardingView(ctx) {
     const results = h('div', {});
     const ex = excludedTags(p);
     search.oninput = () => {
-      const found = searchCatalog(search.value, CATALOG.filter((x) => allowedByRestrictions(x, ex)), 6).filter((x) => !ids.includes(x.id));
+      const found = searchCatalog(search.value, CATALOG, 12, { filter: (x) => allowedByRestrictions(x, ex) }).filter((x) => !ids.includes(x.id)).slice(0, 6);
       results.replaceChildren(...found.map((x) => h('button', { class: 'chip', onclick: () => { D.extraPool.push(x.id); rerender(); } }, '+ ' + x.name)));
     };
     return wrap('Пул еды',
@@ -286,12 +295,10 @@ export async function onboardingView(ctx) {
     h('p', { class: 'muted' }, 'Каждое утро — короткий чекин: вес, сон, готовность. Раз в неделю — сводка и адаптация плана.'),
     nav(true, 'Начать', async () => {
       const ex = excludedTags(profileLike());
-      const cat = Object.fromEntries(CATALOG.map((x) => [x.id, x]));
+      const cat = CATALOG_BY_ID;
       const yesterday = D.keepYesterday
-        ? D.yesterday.filter((e) => cat[e.refId] && allowedByRestrictions(cat[e.refId], ex)).map((e) => ({
-          ts: Date.now() - 86400000, refType: cat[e.refId].kind, refId: e.refId, name: cat[e.refId].name, grams: e.grams,
-          ...macrosFor(cat[e.refId], e.grams), nova: cat[e.refId].nova, confidence: e.confidence, method: 'llm', planItemId: null,
-        }))
+        ? D.yesterday.filter((e) => cat[e.refId] && allowedByRestrictions(cat[e.refId], ex))
+          .map((e) => ({ ...S.makeEntry({ refId: e.refId, grams: e.grams, method: 'llm', confidence: e.confidence }), ts: Date.now() - 86400000 }))
         : [];
       await S.completeOnboarding({
         ...D, goal: D.checkedGoal, phase: D.phase, pool: D.pool, yesterday, noNumbers,
